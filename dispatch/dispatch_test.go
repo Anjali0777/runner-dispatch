@@ -8,7 +8,9 @@ import (
 
 // impls lists every Dispatcher under test; each test runs against all of them.
 var impls = map[string]func(Caps) Dispatcher{
-	"naive": func(c Caps) Dispatcher { return NewNaive(c) },
+	"naive":   func(c Caps) Dispatcher { return NewNaive(c) },
+	"indexed": func(c Caps) Dispatcher { return NewIndexed(c) },
+	"locked":  func(c Caps) Dispatcher { return NewLocked(NewIndexed(c)) },
 }
 
 func forEach(t *testing.T, fn func(t *testing.T, mk func(Caps) Dispatcher)) {

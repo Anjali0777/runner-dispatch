@@ -32,6 +32,7 @@ var impls = []struct {
 	mk   func(dispatch.Caps) dispatch.Dispatcher
 }{
 	{"naive", func(c dispatch.Caps) dispatch.Dispatcher { return dispatch.NewNaive(c) }},
+	{"indexed", func(c dispatch.Caps) dispatch.Dispatcher { return dispatch.NewIndexed(c) }},
 }
 
 var caps = dispatch.Caps{Default: 60, PerOrg: map[string]int{workload.NoisyOrg: 200}}
