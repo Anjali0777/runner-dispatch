@@ -4,6 +4,9 @@
 //	go run ./cmd/bench -quick          # smaller sizes, for CI
 //	go run ./cmd/bench -out results/bench.md
 //
+// Waits are measured in steps (one idle runner per step), so they compare
+// scheduling order independent of machine speed.
+//
 // Scenarios:
 //
 //	steady  queue held at a fixed depth; each step one runner goes idle,
@@ -20,6 +23,7 @@ import (
 	"io"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -42,7 +46,8 @@ const runners = 5000 // jobs allowed to be running at once in steady/noisy
 type steadyResult struct {
 	p50, p99, mean time.Duration
 	perSec         float64
-	fairP99        int // p99 wait, in steps, for jobs not from the noisy org
+	smallP50       int // median wait, in steps, for jobs from long-tail orgs
+	heavyP99       int // p99 wait for jobs from the 10 busiest ordinary orgs
 	assigned       int
 }
 
@@ -51,11 +56,11 @@ func steady(mk func(dispatch.Caps) dispatch.Dispatcher, depth, steps int, noisy 
 	g := workload.New(workload.Config{Orgs: 2000, ZipfS: 1.2, NoisyShare: noisy, Seed: 42})
 	d := mk(caps)
 	enqAt := map[uint64]int{}
-	isNoisy := map[uint64]bool{}
+	class := map[uint64]byte{} // 'n' noisy, 'h' heavy (top-10 org), 's' small
 	add := func(step int) {
 		j := g.Job()
 		enqAt[j.ID] = step
-		isNoisy[j.ID] = j.Org == workload.NoisyOrg
+		class[j.ID] = classify(j.Org)
 		d.Enqueue(j)
 	}
 	for i := 0; i < depth; i++ {
@@ -63,7 +68,7 @@ func steady(mk func(dispatch.Caps) dispatch.Dispatcher, depth, steps int, noisy 
 	}
 	var running []uint64
 	lat := make([]time.Duration, 0, steps)
-	var waits []int
+	var small, heavy []int
 	start := time.Now()
 	for step := 0; step < steps; step++ {
 		r := g.Runner()
@@ -72,11 +77,14 @@ func steady(mk func(dispatch.Caps) dispatch.Dispatcher, depth, steps int, noisy 
 		lat = append(lat, time.Since(t0))
 		if ok {
 			running = append(running, j.ID)
-			if !isNoisy[j.ID] {
-				waits = append(waits, step-enqAt[j.ID])
+			switch class[j.ID] {
+			case 's':
+				small = append(small, step-enqAt[j.ID])
+			case 'h':
+				heavy = append(heavy, step-enqAt[j.ID])
 			}
 			delete(enqAt, j.ID)
-			delete(isNoisy, j.ID)
+			delete(class, j.ID)
 		}
 		if len(running) > runners {
 			d.Complete(running[0])
@@ -91,7 +99,8 @@ func steady(mk func(dispatch.Caps) dispatch.Dispatcher, depth, steps int, noisy 
 	}
 	elapsed := time.Since(start)
 	sort.Slice(lat, func(a, b int) bool { return lat[a] < lat[b] })
-	sort.Ints(waits)
+	sort.Ints(small)
+	sort.Ints(heavy)
 	var sum time.Duration
 	for _, l := range lat {
 		sum += l
@@ -103,10 +112,24 @@ func steady(mk func(dispatch.Caps) dispatch.Dispatcher, depth, steps int, noisy 
 		perSec:   float64(len(lat)) / elapsed.Seconds(),
 		assigned: len(lat),
 	}
-	if len(waits) > 0 {
-		res.fairP99 = waits[len(waits)*99/100]
+	if len(small) > 0 {
+		res.smallP50 = small[len(small)/2]
+	}
+	if len(heavy) > 0 {
+		res.heavyP99 = heavy[len(heavy)*99/100]
 	}
 	return res
+}
+
+// classify buckets an org: the noisy one, the 10 busiest (Zipf ranks 0-9), or the long tail.
+func classify(org string) byte {
+	if org == workload.NoisyOrg {
+		return 'n'
+	}
+	if n, err := strconv.Atoi(strings.TrimPrefix(org, "org-")); err == nil && n < 10 {
+		return 'h'
+	}
+	return 's'
 }
 
 type drainResult struct {
@@ -211,13 +234,13 @@ func main() {
 		noisy float64
 	}{{"steady", 0}, {"noisy", 0.5}} {
 		fmt.Fprintf(w, "\n### %s (Assign latency, queue held at depth)\n\n", sc.name)
-		fmt.Fprintln(w, "| impl | depth | p50 | p99 | mean | assigns/s | p99 wait, other orgs (steps) |")
-		fmt.Fprintln(w, "|---|---:|---:|---:|---:|---:|---:|")
+		fmt.Fprintln(w, "| impl | depth | p50 | p99 | mean | assigns/s | median wait, long-tail orgs | p99 wait, top-10 orgs |")
+		fmt.Fprintln(w, "|---|---:|---:|---:|---:|---:|---:|---:|")
 		for _, depth := range depths {
 			for _, im := range impls {
 				r := steady(im.mk, depth, steps, sc.noisy, budget)
-				fmt.Fprintf(w, "| %s | %d | %s | %s | %s | %.0f | %d |\n",
-					im.name, depth, us(r.p50), us(r.p99), us(r.mean), r.perSec, r.fairP99)
+				fmt.Fprintf(w, "| %s | %d | %s | %s | %s | %.0f | %d | %d |\n",
+					im.name, depth, us(r.p50), us(r.p99), us(r.mean), r.perSec, r.smallP50, r.heavyP99)
 			}
 		}
 	}
