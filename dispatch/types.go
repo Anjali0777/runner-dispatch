@@ -11,7 +11,7 @@ package dispatch
 type Job struct {
 	ID     uint64
 	Org    string
-	Labels Mask // labels the job requires
+	Labels Mask   // labels the job requires
 	Seq    uint64 // enqueue order, set by the dispatcher
 }
 
